@@ -1,0 +1,10 @@
+{
+    "require_approval_for": [
+        "delete_file",
+        "execute_terminal",
+        "open_application"
+    ],
+    "allowed_directories": [
+        "C:\\Users\\ALIM\\Downloads\\ORCHID"
+    ]
+}
