@@ -12,62 +12,19 @@ from plugins.web_network import WEB_TOOLS, WEB_TOOL_MAP
 from plugins.terminal_control import TERMINAL_TOOLS, TERMINAL_TOOL_MAP
 from plugins.input_control import INPUT_TOOLS, INPUT_TOOL_MAP
 from plugins.office_tools import OFFICE_TOOLS, OFFICE_TOOL_MAP
+from plugins.code_assistant import CODE_TOOLS, CODE_TOOL_MAP
+from core.settings_manager import SettingsManager
 
 # ─── Konfigurasi Backend ────────────────────────────────────────────
 OLLAMA_BASE_URL  = "http://localhost:11434/v1"
 AZURE_BASE_URL   = "https://models.inference.ai.azure.com"
-
-SYSTEM_PROMPT = """
-Kamu adalah ORCHID, asisten AI desktop canggih yang berjalan langsung di komputer pengguna.
-
-=== ATURAN WAJIB (TIDAK BOLEH DILANGGAR) ===
-
-1. JANGAN PERNAH memberi instruksi manual kepada pengguna. Selalu eksekusi langsung menggunakan tools.
-2. Selalu jawab dalam Bahasa Indonesia kecuali pengguna meminta bahasa lain.
-3. Untuk tugas multi-langkah, eksekusi tools satu per satu secara berurutan TANPA menunggu konfirmasi.
-4. Setelah semua tool selesai, baru berikan laporan singkat kepada pengguna.
-
-=== PANDUAN PEMILIHAN TOOL (ROUTING) ===
-
-PENCARIAN INTERNET / INFO TERBARU:
-  → Gunakan: search_duckduckgo(query)
-  → JANGAN pakai: keyboard_hotkey, open_website, atau cara browser manual
-
-MEMBUKA WEBSITE:
-  → Gunakan: open_website(url)
-  → JANGAN pakai: keyboard_hotkey win+r, atau keyboard_type
-
-MEMBUAT / MENULIS FILE:
-  → Gunakan: write_file(file_path, content)
-  → JANGAN tampilkan kode ke chat
-
-MEMBUAT FOLDER:
-  → Gunakan: create_directory(dir_path)
-
-MENJALANKAN PERINTAH SHELL / TERMINAL:
-  → Gunakan: execute_powershell(command)
-
-MEMBACA DOKUMEN (PDF/Word/Excel):
-  → Gunakan: read_pdf / read_docx / read_excel
-
-INFO HARDWARE / SISTEM:
-  → Gunakan: get_system_info atau get_hardware_info
-
-MOUSE & KEYBOARD (input_control):
-  → HANYA gunakan jika pengguna secara eksplisit meminta otomatisasi UI
-    (misal: "klik tombol di aplikasi X", "ketikkan teks di Notepad")
-  → JANGAN pakai untuk pencarian internet, membuka website, atau tugas
-    yang sudah punya tool khusus di atas
-
-=== HIERARKI PRIORITAS TOOL ===
-Tool khusus (search_duckduckgo, write_file, dll) > execute_powershell > mouse/keyboard
-"""
 
 MAX_AGENT_ITERATIONS = 15  # Batas maksimum putaran tool calling agar tidak infinite loop
 
 class ChatEngine:
     def __init__(self):
         load_dotenv()
+        self.settings_mgr = SettingsManager()
         self.token_1 = os.environ.get("GITHUB_TOKEN_1") or os.environ.get("GITHUB_TOKEN")
         self.token_2 = os.environ.get("GITHUB_TOKEN_2")
         self.sandbox = SecuritySandbox()
@@ -76,16 +33,18 @@ class ChatEngine:
         self.tools = (
             SYSTEM_TOOLS + GIT_TOOLS + FILE_TOOLS +
             HARDWARE_TOOLS + WEB_TOOLS + TERMINAL_TOOLS +
-            INPUT_TOOLS + OFFICE_TOOLS
+            INPUT_TOOLS + OFFICE_TOOLS + CODE_TOOLS
         )
         self.tool_map = {
             **SYSTEM_TOOL_MAP, **GIT_TOOL_MAP, **FILE_TOOL_MAP,
             **HARDWARE_TOOL_MAP, **WEB_TOOL_MAP, **TERMINAL_TOOL_MAP,
-            **INPUT_TOOL_MAP, **OFFICE_TOOL_MAP
+            **INPUT_TOOL_MAP, **OFFICE_TOOL_MAP, **CODE_TOOL_MAP
         }
 
-        # Default: coba Ollama lokal dulu, fallback ke Azure jika ada token
-        self._init_ollama()
+        # Default: Jangan inisiasi backend otomatis di sini agar bisa di-load secara async oleh UI
+        self.client = None
+        self.model = None
+        self.backend = None
 
     # ─── Inisialisasi Backend ────────────────────────────────────────
     def _init_ollama(self, model_tag="qwen2.5:latest"):
@@ -109,7 +68,21 @@ class ChatEngine:
         self._reset_messages()
 
     def _reset_messages(self):
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [
+            {"role": "system", "content": self.settings_mgr.get("system_prompt")}
+        ]
+
+    def preload_model(self):
+        """Kirim dummy request untuk memaksa model dimuat ke VRAM/verifikasi koneksi."""
+        if not self.client or not self.model:
+            raise ValueError("Klien AI belum diinisialisasi.")
+            
+        # Kirim 1 token kosong agar Ollama me-load model ke VRAM
+        self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1
+        )
 
     # ─── Pergantian Model dari UI ────────────────────────────────────
     def switch_account(self, account_index):
@@ -117,21 +90,28 @@ class ChatEngine:
         1 → Ollama qwen2.5 (lokal)
         2 → Azure GPT-4o Akun 1
         3 → Azure GPT-4o Akun 2
+        Returns: (success_bool, message_str)
         """
-        if account_index == 1:
-            self._init_ollama("qwen2.5:latest")
-            return True
-        elif account_index == 2:
-            if not self.token_1:
-                return False
-            self._init_azure(self.token_1, "gpt-4o")
-            return True
-        elif account_index == 3:
-            if not self.token_2:
-                return False
-            self._init_azure(self.token_2, "gpt-4o")
-            return True
-        return False
+        try:
+            if account_index == 1:
+                self._init_ollama("qwen2.5:latest")
+                self.preload_model()
+                return True, "Ollama lokal siap digunakan."
+            elif account_index == 2:
+                if not self.token_1:
+                    return False, "Token GitHub Akun 1 tidak ditemukan di file .env"
+                self._init_azure(self.token_1, "gpt-4o")
+                self.preload_model()
+                return True, "Azure GPT-4o (Akun 1) terhubung."
+            elif account_index == 3:
+                if not self.token_2:
+                    return False, "Token GitHub Akun 2 tidak ditemukan di file .env"
+                self._init_azure(self.token_2, "gpt-4o")
+                self.preload_model()
+                return True, "Azure GPT-4o (Akun 2) terhubung."
+            return False, "Indeks akun tidak valid."
+        except Exception as e:
+            return False, f"Gagal memuat model: {str(e)}"
 
     # ─── Gaya Bicara ─────────────────────────────────────────────────
     def set_speaking_style(self, style):
@@ -157,12 +137,15 @@ class ChatEngine:
         self.messages.append({"role": "user", "content": user_message})
 
         try:
+            temp = float(self.settings_mgr.get("temperature"))
+            max_tok = int(self.settings_mgr.get("max_tokens"))
+            
             for iteration in range(MAX_AGENT_ITERATIONS):
                 kwargs = {
                     "model": self.model,
                     "messages": self.messages,
-                    "temperature": 0.7,
-                    "max_tokens": 2048,
+                    "temperature": temp,
+                    "max_tokens": max_tok,
                     "tools": self.tools,
                 }
 
@@ -209,8 +192,8 @@ class ChatEngine:
             final_response = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages + [{"role": "user", "content": "Berikan laporan singkat hasil semua yang sudah dikerjakan."}],
-                temperature=0.7,
-                max_tokens=1024,
+                temperature=temp,
+                max_tokens=max_tok,
             )
             return final_response.choices[0].message.content or "Semua tugas selesai."
 
