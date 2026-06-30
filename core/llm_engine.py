@@ -133,6 +133,19 @@ class ChatEngine:
             self.messages[0]["content"] = new_prompt
         return True
 
+    # ─── Helper: Strip qwen3 <think> tags ────────────────────────────────────
+    @staticmethod
+    def _strip_think_tags(text: str) -> str:
+        """
+        qwen3 dan model 'thinking' lainnya menyisipkan proses penalaran
+        di dalam tag <think>...</think>. Strip tag ini dari output akhir
+        sebelum ditampilkan ke pengguna.
+        """
+        import re
+        # Hapus blok <think>...</think> beserta isinya
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return text.strip()
+
     # ─── Generate Respon (Agentic Loop) ──────────────────────────────────
     def generate_response(self, user_message, on_tool_call=None):
         """
@@ -143,41 +156,50 @@ class ChatEngine:
         self.messages.append({"role": "user", "content": user_message})
 
         try:
-            temp = float(self.settings_mgr.get("temperature"))
+            temp  = float(self.settings_mgr.get("temperature"))
             max_tok = int(self.settings_mgr.get("max_tokens"))
 
             # ── Smart Tool Routing ──────────────────────────────────────────
-            # Pilih hanya tools yang relevan dengan pesan user (~80% token saving)
             active_tools = self.tool_router.select(user_message)
 
             for iteration in range(MAX_AGENT_ITERATIONS):
                 kwargs = {
-                    "model": self.model,
-                    "messages": self.messages,
+                    "model":       self.model,
+                    "messages":    self.messages,
                     "temperature": temp,
-                    "max_tokens": max_tok,
-                    # Kirim active_tools (bisa kosong jika casual chat)
-                    "tools": active_tools if active_tools else None,
+                    "max_tokens":  max_tok,
                 }
+                # Jangan kirim tools sama sekali jika kosong
+                # (tools=None menyebabkan error pada beberapa versi Ollama)
+                if active_tools:
+                    kwargs["tools"] = active_tools
 
                 response = self.client.chat.completions.create(**kwargs)
                 response_message = response.choices[0].message
                 self.messages.append(response_message)
 
-                # ── Tidak ada tool call → AI sudah selesai, kembalikan jawaban ──
+                # ── Tidak ada tool call → AI sudah selesai ──
                 if not response_message.tool_calls:
-                    return response_message.content or "Maaf, respons kosong."
+                    content = response_message.content or ""
+
+                    # ── Tangani qwen3 <think>...</think> tags ──
+                    # qwen3:4b menyisipkan proses berpikir dalam tag <think>
+                    # Kita strip tag tersebut agar tidak tampil di UI
+                    content = self._strip_think_tags(content)
+
+                    return content if content.strip() else "Maaf, tidak ada jawaban yang dihasilkan."
 
                 # ── Ada tool call → eksekusi semua, lanjut iterasi berikutnya ──
                 for tool_call in response_message.tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
+                    try:
+                        function_args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        function_args = {}
 
-                    # Notifikasi ke UI (opsional)
                     if on_tool_call:
                         on_tool_call(function_name, function_args)
 
-                    # Validasi Sandbox
                     if not self.sandbox.validate_action(function_name, **function_args):
                         function_response = (
                             f"[SANDBOX BLOCKED] Pengguna tidak mengizinkan perintah "
@@ -193,22 +215,24 @@ class ChatEngine:
                             function_response = f"[NOT FOUND] Fungsi '{function_name}' tidak terdaftar."
 
                     self.messages.append({
-                        "role": "tool",
+                        "role":        "tool",
                         "tool_call_id": tool_call.id,
-                        "name": function_name,
-                        "content": str(function_response),
+                        "name":        function_name,
+                        "content":     str(function_response),
                     })
 
-            # Jika loop habis tanpa jawaban final, minta ringkasan
+            # Jika loop habis tanpa jawaban final
             final_response = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages + [{"role": "user", "content": "Berikan laporan singkat hasil semua yang sudah dikerjakan."}],
                 temperature=temp,
                 max_tokens=max_tok,
             )
-            return final_response.choices[0].message.content or "Semua tugas selesai."
+            content = final_response.choices[0].message.content or "Semua tugas selesai."
+            return self._strip_think_tags(content)
 
         except Exception as e:
             if self.messages and self.messages[-1]["role"] == "user":
                 self.messages.pop()
+
             return f"[ERROR ORCHID] Gagal berkomunikasi dengan AI ({self.model}): {str(e)}"
