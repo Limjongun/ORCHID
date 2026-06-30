@@ -62,10 +62,16 @@ class OrchidApp(ctk.CTk):
         # Model Switcher
         self.model_combo = ctk.CTkComboBox(
             self.sidebar_frame,
-            values=["🤖 Ollama (qwen2.5 Lokal)", "☁️ GPT-4o (Akun 1)", "☁️ GPT-4o (Akun 2)"],
+            values=[
+                "[Ollama] qwen3:4b",
+                "[Ollama] qwen2.5:latest",
+                "[Ollama] gemma4:latest",
+                "[Azure] GPT-4o Akun 1",
+                "[Azure] GPT-4o Akun 2",
+            ],
             command=self.switch_model
         )
-        self.model_combo.set("🤖 Ollama (qwen2.5 Lokal)")
+        self.model_combo.set("[Ollama] qwen3:4b")
         self.model_combo.grid(row=6, column=0, padx=20, pady=(20, 10), sticky="ew")
         
         # Style Switcher
@@ -75,27 +81,32 @@ class OrchidApp(ctk.CTk):
     def switch_model(self, choice):
         if not getattr(self, "chat_engine", None):
             return
-        
-        if "Ollama" in choice:
+
+        # Parse backend dan model tag dari string pilihan combobox
+        ollama_tag = None
+        if choice.startswith("[Ollama]"):
             account_index = 1
-        elif "Akun 1" in choice:
+            # Ekstrak tag model: "[Ollama] qwen3:4b" -> "qwen3:4b"
+            ollama_tag = choice.replace("[Ollama]", "").strip()
+        elif "Akun 1" in choice or "Akun1" in choice:
             account_index = 2
-        elif "Akun 2" in choice:
+        elif "Akun 2" in choice or "Akun2" in choice:
             account_index = 3
         else:
             account_index = 1
-            
+
         # Kunci UI selama loading
         if hasattr(self, 'btn_send'):
             self.btn_send.configure(state="disabled")
             self.entry_msg.configure(state="disabled")
-        
-        self.show_loading(custom_msg=f"⚙️ Memuat model {choice} ke VRAM...")
-        
+
+        model_label = ollama_tag or choice
+        self.show_loading(custom_msg=f"Memuat {model_label} ke VRAM")
+
         def background_load():
-            success, msg = self.chat_engine.switch_account(account_index)
+            success, msg = self.chat_engine.switch_account(account_index, ollama_model_tag=ollama_tag)
             self.after(0, self._on_model_loaded, choice, success, msg)
-            
+
         thread = threading.Thread(target=background_load)
         thread.daemon = True
         thread.start()

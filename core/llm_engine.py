@@ -89,18 +89,21 @@ class ChatEngine:
         )
 
     # ─── Pergantian Model dari UI ────────────────────────────────────
-    def switch_account(self, account_index):
+    def switch_account(self, account_index, ollama_model_tag: str = None):
         """
-        1 → Ollama qwen2.5 (lokal)
-        2 → Azure GPT-4o Akun 1
-        3 → Azure GPT-4o Akun 2
+        Ganti model backend secara dinamis.
+        account_index:
+          1   → Ollama lokal (gunakan ollama_model_tag untuk memilih model)
+          2   → Azure GPT-4o Akun 1
+          3   → Azure GPT-4o Akun 2
         Returns: (success_bool, message_str)
         """
         try:
             if account_index == 1:
-                self._init_ollama("qwen2.5:latest")
+                model_tag = ollama_model_tag or "qwen2.5:latest"
+                self._init_ollama(model_tag)
                 self.preload_model()
-                return True, "Ollama lokal siap digunakan."
+                return True, f"Model Ollama '{model_tag}' siap digunakan."
             elif account_index == 2:
                 if not self.token_1:
                     return False, "Token GitHub Akun 1 tidak ditemukan di file .env"
@@ -116,7 +119,6 @@ class ChatEngine:
             return False, "Indeks akun tidak valid."
         except Exception as e:
             return False, f"Gagal memuat model: {str(e)}"
-
     # ─── Gaya Bicara ─────────────────────────────────────────────────
     def set_speaking_style(self, style):
         base = self.settings_mgr.get("system_prompt")
