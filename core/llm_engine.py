@@ -15,6 +15,7 @@ from plugins.office_tools import OFFICE_TOOLS, OFFICE_TOOL_MAP
 from plugins.code_assistant import CODE_TOOLS, CODE_TOOL_MAP
 from core.settings_manager import SettingsManager
 from core.tool_router import ToolRouter
+from core.rag_engine import RAGEngine, is_orchid_query
 
 # ─── Konfigurasi Backend ────────────────────────────────────────────
 OLLAMA_BASE_URL  = "http://localhost:11434/v1"
@@ -44,6 +45,10 @@ class ChatEngine:
 
         # Smart Tool Router — memilih tools yang relevan per request
         self.tool_router = ToolRouter(verbose=False)
+
+        # RAG Engine — retrieval konteks proyek untuk pertanyaan casual/general
+        # Diinisialisasi sekali saat startup (build TF-IDF index ~0.5 detik)
+        self.rag = RAGEngine()
 
         # Default: Jangan inisiasi backend otomatis di sini agar bisa di-load secara async oleh UI
         self.client = None
@@ -162,10 +167,28 @@ class ChatEngine:
             # ── Smart Tool Routing ──────────────────────────────────────────
             active_tools = self.tool_router.select(user_message)
 
+            # ── RAG Context Injection ───────────────────────────────────────
+            # Aktif ketika: (1) pesan casual/tidak punya tools aktif, ATAU
+            #              (2) pesan berisi pertanyaan tentang ORCHID sendiri
+            rag_context = ""
+            if not active_tools or is_orchid_query(user_message):
+                rag_context = self.rag.augment_prompt(user_message, top_k=3)
+
+            # Bangun message list — dengan konteks RAG di system message jika ada
+            if rag_context:
+                base_system = self.messages[0]["content"] if self.messages else ""
+                augmented_system = base_system + "\n\n" + rag_context
+                messages_for_request = [
+                    {"role": "system", "content": augmented_system},
+                    *self.messages[1:]   # semua pesan kecuali system asli
+                ]
+            else:
+                messages_for_request = self.messages
+
             for iteration in range(MAX_AGENT_ITERATIONS):
                 kwargs = {
                     "model":       self.model,
-                    "messages":    self.messages,
+                    "messages":    messages_for_request,
                     "temperature": temp,
                     "max_tokens":  max_tok,
                 }
@@ -181,12 +204,9 @@ class ChatEngine:
                 # ── Tidak ada tool call → AI sudah selesai ──
                 if not response_message.tool_calls:
                     content = response_message.content or ""
-
-                    # ── Tangani qwen3 <think>...</think> tags ──
-                    # qwen3:4b menyisipkan proses berpikir dalam tag <think>
-                    # Kita strip tag tersebut agar tidak tampil di UI
                     content = self._strip_think_tags(content)
-
+                    # Update messages_for_request agar tool loop berikutnya pakai versi augmented
+                    messages_for_request.append(response_message)
                     return content if content.strip() else "Maaf, tidak ada jawaban yang dihasilkan."
 
                 # ── Ada tool call → eksekusi semua, lanjut iterasi berikutnya ──
