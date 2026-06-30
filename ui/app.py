@@ -20,15 +20,19 @@ class OrchidApp(ctk.CTk):
         
         self.msg_row = 0 # Track rows in the chat frame
         
-        # Inisialisasi AI Engine
+        # Inisialisasi AI Engine (belum konek backend)
         try:
             self.chat_engine = ChatEngine()
         except Exception as e:
             self.chat_engine = None
             self.startup_error = str(e)
-
+            
         self._build_sidebar()
         self._build_main_frame()
+        
+        # Mulai load model secara async pada saat startup
+        if self.chat_engine:
+            self.after(500, lambda: self.switch_model(self.model_combo.get()))
         
     def _build_sidebar(self):
         self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0)
@@ -40,7 +44,7 @@ class OrchidApp(ctk.CTk):
         self.logo_label.grid(row=0, column=0, padx=20, pady=(30, 40))
         
         # Buttons
-        self.btn_chat = ctk.CTkButton(self.sidebar_frame, text="Chat", fg_color="#87CEEB", text_color="black", hover_color="#5F9EA0", anchor="w")
+        self.btn_chat = ctk.CTkButton(self.sidebar_frame, text="Chat", fg_color="#87CEEB", text_color="black", hover_color="#5F9EA0", anchor="w", command=self.show_chat_frame)
         self.btn_chat.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
         
         self.btn_tools = ctk.CTkButton(self.sidebar_frame, text="Tools & Plugins", fg_color="transparent", text_color="gray90", hover_color="gray30", anchor="w")
@@ -52,7 +56,7 @@ class OrchidApp(ctk.CTk):
         self.btn_monitoring = ctk.CTkButton(self.sidebar_frame, text="Monitoring", fg_color="transparent", text_color="gray90", hover_color="gray30", anchor="w")
         self.btn_monitoring.grid(row=4, column=0, padx=20, pady=10, sticky="ew")
         
-        self.btn_settings = ctk.CTkButton(self.sidebar_frame, text="Settings", fg_color="transparent", text_color="gray90", hover_color="gray30", anchor="w")
+        self.btn_settings = ctk.CTkButton(self.sidebar_frame, text="Settings", fg_color="transparent", text_color="gray90", hover_color="gray30", anchor="w", command=self.show_settings_frame)
         self.btn_settings.grid(row=5, column=0, padx=20, pady=10, sticky="ew")
         
         # Model Switcher
@@ -81,11 +85,31 @@ class OrchidApp(ctk.CTk):
         else:
             account_index = 1
             
-        success = self.chat_engine.switch_account(account_index)
+        # Kunci UI selama loading
+        if hasattr(self, 'btn_send'):
+            self.btn_send.configure(state="disabled")
+            self.entry_msg.configure(state="disabled")
+        
+        self.show_loading(custom_msg=f"⚙️ Memuat model {choice} ke VRAM...")
+        
+        def background_load():
+            success, msg = self.chat_engine.switch_account(account_index)
+            self.after(0, self._on_model_loaded, choice, success, msg)
+            
+        thread = threading.Thread(target=background_load)
+        thread.daemon = True
+        thread.start()
+
+    def _on_model_loaded(self, choice, success, msg):
+        self.hide_loading()
+        if hasattr(self, 'btn_send'):
+            self.btn_send.configure(state="normal")
+            self.entry_msg.configure(state="normal")
+            
         if success:
-            self.append_chat("SYSTEM", f"✅ Berhasil berganti ke {choice}.")
+            self.append_chat("SYSTEM", f"✅ {msg}")
         else:
-            self.append_chat("SYSTEM", f"❌ Gagal berganti ke {choice}. Pastikan token tersedia di file .env.")
+            self.append_chat("SYSTEM", f"❌ Gagal: {msg}")
             
     def switch_style(self, choice):
         if not getattr(self, "chat_engine", None):
@@ -95,8 +119,15 @@ class OrchidApp(ctk.CTk):
         self.append_chat("SYSTEM", f"Gaya bicara AI diubah ke mode: {choice}.")
 
     def _build_main_frame(self):
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, sticky="nsew")
+        self.main_container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.main_container.grid(row=0, column=1, sticky="nsew")
+        self.main_container.grid_columnconfigure(0, weight=1)
+        self.main_container.grid_rowconfigure(0, weight=1)
+
+        self.main_frame = ctk.CTkFrame(self.main_container, corner_radius=0, fg_color="transparent")
+        self.main_frame.grid(row=0, column=0, sticky="nsew")
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_rowconfigure(0, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_rowconfigure(0, weight=1)
         
@@ -105,10 +136,7 @@ class OrchidApp(ctk.CTk):
         self.chat_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="nsew")
         self.chat_frame.grid_columnconfigure(0, weight=1)
         
-        if getattr(self, "chat_engine", None):
-            model_name = getattr(self.chat_engine, 'model', 'AI')
-            self.append_chat("ORCHID", f"Halo! Saya ORCHID, asisten AI desktop lokal Anda. Saat ini saya berjalan dengan model **{model_name}** via Ollama. Ada yang bisa saya bantu?")
-        else:
+        if not getattr(self, "chat_engine", None):
             self.append_chat("SYSTEM", f"Gagal memuat AI Engine: {getattr(self, 'startup_error', 'Unknown')}")
             
         # Input Area
@@ -126,6 +154,72 @@ class OrchidApp(ctk.CTk):
         self.btn_send.configure(command=self.send_message_event)
         self.entry_msg.bind("<Return>", self.send_message_event)
         
+        self._build_settings_frame()
+
+    def show_chat_frame(self):
+        self.settings_frame.grid_forget()
+        self.main_frame.grid(row=0, column=0, sticky="nsew")
+        self.btn_chat.configure(fg_color="#87CEEB", text_color="black")
+        self.btn_settings.configure(fg_color="transparent", text_color="gray90")
+
+    def show_settings_frame(self):
+        self.main_frame.grid_forget()
+        self.settings_frame.grid(row=0, column=0, sticky="nsew")
+        self.btn_settings.configure(fg_color="#87CEEB", text_color="black")
+        self.btn_chat.configure(fg_color="transparent", text_color="gray90")
+
+    def _build_settings_frame(self):
+        self.settings_frame = ctk.CTkFrame(self.main_container, corner_radius=0, fg_color="transparent")
+        self.settings_frame.grid_columnconfigure(0, weight=1)
+        
+        title = ctk.CTkLabel(self.settings_frame, text="⚙️ Settings", font=ctk.CTkFont(size=24, weight="bold"))
+        title.grid(row=0, column=0, padx=40, pady=(40, 20), sticky="w")
+        
+        scroll = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
+        scroll.grid(row=1, column=0, padx=40, pady=0, sticky="nsew")
+        self.settings_frame.grid_rowconfigure(1, weight=1)
+        
+        # Temperature
+        ctk.CTkLabel(scroll, text="Temperature (Kreativitas)", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(10, 5))
+        self.temp_slider = ctk.CTkSlider(scroll, from_=0.0, to=1.0, number_of_steps=10)
+        self.temp_slider.pack(fill="x", pady=(0, 10))
+        
+        # Max Tokens
+        ctk.CTkLabel(scroll, text="Max Tokens", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(10, 5))
+        self.max_tokens_combo = ctk.CTkComboBox(scroll, values=["512", "1024", "2048", "4096", "8192"])
+        self.max_tokens_combo.pack(fill="x", pady=(0, 10))
+        
+        # System Prompt
+        ctk.CTkLabel(scroll, text="System Prompt (Instruksi Dasar AI)", font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", pady=(20, 5))
+        self.sys_prompt_textbox = ctk.CTkTextbox(scroll, height=300, font=ctk.CTkFont(size=12))
+        self.sys_prompt_textbox.pack(fill="both", expand=True, pady=(0, 20))
+        
+        # Save Button
+        btn_save = ctk.CTkButton(scroll, text="Save Settings", font=ctk.CTkFont(weight="bold"), fg_color="#4CAF50", hover_color="#45a049", command=self.save_settings)
+        btn_save.pack(anchor="w", pady=20)
+        
+        # Load current values
+        if getattr(self, "chat_engine", None):
+            mgr = self.chat_engine.settings_mgr
+            self.temp_slider.set(float(mgr.get("temperature")))
+            self.max_tokens_combo.set(str(mgr.get("max_tokens")))
+            self.sys_prompt_textbox.insert("1.0", mgr.get("system_prompt"))
+            
+    def save_settings(self):
+        if getattr(self, "chat_engine", None):
+            new_settings = {
+                "temperature": self.temp_slider.get(),
+                "max_tokens": int(self.max_tokens_combo.get()),
+                "theme": "Dark",
+                "system_prompt": self.sys_prompt_textbox.get("1.0", "end").strip()
+            }
+            success, msg = self.chat_engine.settings_mgr.save_settings(new_settings)
+            
+            # Terapkan prompt baru ke memori jika chat sedang kosong, atau reset chat
+            self.chat_engine._reset_messages()
+            self.append_chat("SYSTEM", f"✅ {msg} Konteks percakapan di-reset agar aturan baru berlaku.")
+            self.show_chat_frame()
+
     def append_chat(self, sender, text):
         # Create a container frame for the bubble to handle alignment
         msg_container = ctk.CTkFrame(self.chat_frame, fg_color="transparent")
@@ -151,7 +245,7 @@ class OrchidApp(ctk.CTk):
         self.chat_frame.update_idletasks()
         self.chat_frame._parent_canvas.yview_moveto(1.0)
         
-    def show_loading(self):
+    def show_loading(self, custom_msg="Sedang berpikir"):
         self.loading_container = ctk.CTkFrame(self.chat_frame, fg_color="transparent")
         self.loading_container.grid(row=self.msg_row, column=0, sticky="ew", pady=5)
         self.loading_container.grid_columnconfigure(0, weight=1)
@@ -160,7 +254,7 @@ class OrchidApp(ctk.CTk):
         bubble = ctk.CTkFrame(self.loading_container, fg_color=("gray78", "gray18"), corner_radius=15)
         bubble.pack(side="left", padx=10, pady=2)
         self.loading_label = ctk.CTkLabel(
-            bubble, text="Sedang berpikir...",
+            bubble, text=f"{custom_msg}...",
             text_color=("black", "#87CEEB"),
             font=ctk.CTkFont(size=14, slant="italic")
         )
@@ -171,7 +265,7 @@ class OrchidApp(ctk.CTk):
 
         self.is_loading = True
         self.loading_dots = 0
-        self._current_loading_base = "Sedang berpikir"
+        self._current_loading_base = custom_msg
         self._animate_loading()
 
     def _animate_loading(self):
@@ -251,9 +345,25 @@ class OrchidApp(ctk.CTk):
         reply = self.chat_engine.generate_response(user_text, on_tool_call=on_tool_call)
         self.after(0, self._update_chat_with_reply, reply)
         
+    def _clean_latex_delimiters(self, text):
+        import re
+        # Hapus tanda kurung khusus LaTeX
+        text = re.sub(r'\\\[(.*?)\\\]', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'\\\((.*?)\\\)', r'\1', text, flags=re.DOTALL)
+        # Ganti beberapa perintah LaTeX yang umum dengan Unicode jika AI masih menggunakannya
+        replacements = {
+            r'\beta': 'β', r'\alpha': 'α', r'\epsilon': 'ε', r'\gamma': 'γ',
+            r'_0': '₀', r'_1': '₁', r'_2': '₂', r'_p': 'ₚ',
+            r'\hat{y}': 'ŷ'
+        }
+        for k, v in replacements.items():
+            text = text.replace(k, v)
+        return text
+
     def _update_chat_with_reply(self, reply):
         self.hide_loading()
-        self.append_chat("ORCHID", reply)
+        clean_reply = self._clean_latex_delimiters(reply)
+        self.append_chat("ORCHID", clean_reply)
         self.btn_send.configure(state="normal")
         self.entry_msg.configure(state="normal")
         self.entry_msg.focus()
