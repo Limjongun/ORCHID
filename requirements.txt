@@ -4,3 +4,10 @@ darkdetect
 openai
 python-dotenv
 psutil
+duckduckgo-search
+pyautogui
+PyMuPDF
+python-docx
+openpyxl
+pyperclip
+winotify

@@ -7,3 +7,6 @@ __pycache__/
 env/
 venv/
 .venv/
+
+website_test/
+toko_online/
