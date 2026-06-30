@@ -14,6 +14,7 @@ from plugins.input_control import INPUT_TOOLS, INPUT_TOOL_MAP
 from plugins.office_tools import OFFICE_TOOLS, OFFICE_TOOL_MAP
 from plugins.code_assistant import CODE_TOOLS, CODE_TOOL_MAP
 from core.settings_manager import SettingsManager
+from core.tool_router import ToolRouter
 
 # ─── Konfigurasi Backend ────────────────────────────────────────────
 OLLAMA_BASE_URL  = "http://localhost:11434/v1"
@@ -29,7 +30,7 @@ class ChatEngine:
         self.token_2 = os.environ.get("GITHUB_TOKEN_2")
         self.sandbox = SecuritySandbox()
 
-        # Gabungkan semua Tools dari Plugins
+        # Gabungkan semua Tools dari Plugins (dipakai sebagai pool oleh ToolRouter)
         self.tools = (
             SYSTEM_TOOLS + GIT_TOOLS + FILE_TOOLS +
             HARDWARE_TOOLS + WEB_TOOLS + TERMINAL_TOOLS +
@@ -40,6 +41,9 @@ class ChatEngine:
             **HARDWARE_TOOL_MAP, **WEB_TOOL_MAP, **TERMINAL_TOOL_MAP,
             **INPUT_TOOL_MAP, **OFFICE_TOOL_MAP, **CODE_TOOL_MAP
         }
+
+        # Smart Tool Router — memilih tools yang relevan per request
+        self.tool_router = ToolRouter(verbose=False)
 
         # Default: Jangan inisiasi backend otomatis di sini agar bisa di-load secara async oleh UI
         self.client = None
@@ -115,7 +119,7 @@ class ChatEngine:
 
     # ─── Gaya Bicara ─────────────────────────────────────────────────
     def set_speaking_style(self, style):
-        base = SYSTEM_PROMPT
+        base = self.settings_mgr.get("system_prompt")
         if style == "Singkat & Padat":
             new_prompt = base + " Jawablah dengan SANGAT SINGKAT, PADAT, dan langsung ke intinya. Jangan bertele-tele."
         elif style == "Panjang & Detail":
@@ -139,14 +143,19 @@ class ChatEngine:
         try:
             temp = float(self.settings_mgr.get("temperature"))
             max_tok = int(self.settings_mgr.get("max_tokens"))
-            
+
+            # ── Smart Tool Routing ──────────────────────────────────────────
+            # Pilih hanya tools yang relevan dengan pesan user (~80% token saving)
+            active_tools = self.tool_router.select(user_message)
+
             for iteration in range(MAX_AGENT_ITERATIONS):
                 kwargs = {
                     "model": self.model,
                     "messages": self.messages,
                     "temperature": temp,
                     "max_tokens": max_tok,
-                    "tools": self.tools,
+                    # Kirim active_tools (bisa kosong jika casual chat)
+                    "tools": active_tools if active_tools else None,
                 }
 
                 response = self.client.chat.completions.create(**kwargs)
